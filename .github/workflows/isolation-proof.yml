@@ -180,7 +180,21 @@ jobs:
               sources = {executable}
               for p in stdlib.rglob('*'):
                   if p.is_file() and '__pycache__' not in p.parts and p.suffix not in ['.pyc', '.pyo']:
-                      require(p.resolve().is_relative_to(stdlib), 'SYSTEM_STDLIB_SYMLINK_OUTSIDE_ALLOWLIST')
+                      resolved = p.resolve()
+                      if not resolved.is_relative_to(stdlib):
+                          # Report only public-system metadata; never open the denied target.
+                          public_library = any(resolved.is_relative_to(Path(root)) for root in ['/usr/lib', '/lib', '/lib64'])
+                          public_license = resolved.is_relative_to(Path('/usr/share/common-licenses'))
+                          RECEIPTS['stdlib_symlink_denial'] = {
+                              'entry_relative_to_stdlib': p.relative_to(stdlib).as_posix(),
+                              'entry_is_symlink': p.is_symlink(),
+                              'stdlib_root_is_symlink': stdlib.is_symlink(),
+                              'resolved_target_class': 'PUBLIC_LIBRARY' if public_library else ('PUBLIC_COMMON_LICENSES' if public_license else 'REDACTED_OUTSIDE_PUBLIC_SYSTEM_ROOTS'),
+                              'resolved_target': str(resolved) if public_library or public_license else '[REDACTED]',
+                              'denied_target_contents_read': False,
+                              'admission_policy_changed': False,
+                          }
+                      require(resolved.is_relative_to(stdlib), 'SYSTEM_STDLIB_SYMLINK_OUTSIDE_ALLOWLIST')
                       sources.add(p)
               dynamic = [executable] + sorted((stdlib / 'lib-dynload').glob('*.so'))
               for binary in dynamic:

@@ -1,0 +1,343 @@
+name: Synthetic isolated-runner proof A1
+run-name: One synthetic isolation proof
+'on':
+  workflow_dispatch:
+    inputs:
+      expected_repository:
+        description: 'Exact new public owner/veritas-disposable-isolation-proof-a1 repository'
+        required: true
+        type: string
+permissions: {}
+jobs:
+  synthetic-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: One non-sensitive restricted-child proof
+        shell: bash
+        env:
+          PROOF_EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          PROOF_CURRENT_REPOSITORY: ${{ github.repository }}
+          PROOF_VISIBILITY: ${{ github.event.repository.visibility }}
+          PROOF_EVENT: ${{ github.event_name }}
+          PROOF_ATTEMPT: ${{ github.run_attempt }}
+          PROOF_REF: ${{ github.ref }}
+          PROOF_COMMIT: ${{ github.sha }}
+          PROOF_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I -S - <<'PY_SYNTHETIC_PROOF'
+          import base64
+          import errno
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import socket
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
+          import threading
+          import time
+          import zipfile
+          
+          # This is trusted orchestration on a disposable PUBLIC hosted runner only.
+          # It never reads repository content, host credential files, or private data.
+          CHILD = r'''
+          import errno,json,os,resource,signal,socket,subprocess,sys,time
+          from pathlib import Path
+          
+          checks=[]
+          def check(name,condition,details=None):
+              checks.append({'check':name,'pass':bool(condition),'details':details})
+              if not condition:raise RuntimeError(name)
+          def denied(path):
+              try:
+                  with open(path,'rb') as f:f.read(1)
+              except OSError as e:return e.errno in (errno.ENOENT,errno.EACCES,errno.ENOTDIR)
+              return False
+          try:
+              check('NONROOT_IDENTITY',os.getuid()==65534 and os.geteuid()==65534 and os.getgid()==65534)
+              status={k:v.strip() for k,v in (line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)}
+              check('CAPABILITIES_DROPPED',all(int(status[k],16)==0 for k in ['CapEff','CapPrm','CapBnd']))
+              check('NO_NEW_PRIVILEGES',status['NoNewPrivs']=='1')
+              check('SECCOMP_ACTIVE',status['Seccomp']=='2')
+              check('PRIVATE_PID_NAMESPACE',os.getpid()==1)
+              expected_env={'PATH':'/usr/bin:/bin','HOME':'/tmp','LANG':'C.UTF-8','HOSTNAME':'proof-child'}
+              observed_env=dict(os.environ)
+              locale=observed_env.pop('LC_CTYPE',None)
+              check('ENVIRONMENT_ALLOWLIST',observed_env==expected_env and locale in (None,'C.UTF-8'),{'keys':sorted(os.environ)})
+              descriptors=[]
+              for name in os.listdir('/proc/self/fd'):
+                  try:os.fstat(int(name));descriptors.append(int(name))
+                  except OSError:pass
+              check('NO_EXTRA_INHERITED_FDS',set(descriptors)<=set([0,1,2]),{'fds':sorted(descriptors)})
+              forbidden=['/workspace','/root','/home/runner','/github/home','/github/workspace','/run/secrets',
+                         '/var/run/docker.sock','/run/podman/podman.sock','/run/containerd/containerd.sock']
+              check('NO_PROJECT_HOME_OR_CONTROL_PATHS',all(not Path(p).exists() for p in forbidden))
+              check('HOST_SYNTHETIC_CANARY_DENIED',denied(sys.argv[1]))
+              check('ROOT_FILESYSTEM_READONLY',bool(os.statvfs('/').f_flag & os.ST_RDONLY))
+              size=os.statvfs('/tmp');tmpbytes=size.f_frsize*size.f_blocks
+              check('TEMP_DISK_BOUND',0<tmpbytes<=8*1024*1024,{'tmpfs_bytes':tmpbytes})
+              Path('/tmp/admitted-test').write_text('SYNTHETIC_ONLY')
+              Path('/tmp/admitted-test').unlink()
+              check('ONLY_LOOPBACK_INTERFACE',set(os.listdir('/sys/class/net'))=={'lo'})
+              route=Path('/proc/net/route').read_text().splitlines()[1:]
+              check('NO_NONLOOPBACK_ROUTE',all(not line.strip() or line.split()[0]=='lo' for line in route))
+              s=socket.socket();s.settimeout(.5)
+              try:
+                  s.connect(('192.0.2.1',9));unreachable=False;network_errno=None
+              except OSError as e:unreachable=e.errno in (errno.ENETUNREACH,errno.EHOSTUNREACH);network_errno=e.errno
+              finally:s.close()
+              check('NETWORK_EGRESS_DENIED',unreachable,{'errno':network_errno,'target':'RFC5737_TEST_NET_ONLY'})
+              s=socket.socket();s.settimeout(.5)
+              try:s.connect(('127.0.0.1',int(sys.argv[2])));host_denied=False
+              except OSError as e:host_denied=e.errno in (errno.ECONNREFUSED,errno.ENETUNREACH,errno.EHOSTUNREACH)
+              finally:s.close()
+              check('HOST_LOOPBACK_CANARY_SERVICE_DENIED',host_denied)
+              cg=Path('/sys/fs/cgroup')
+              mem=int((cg/'memory.max').read_text());pids=int((cg/'pids.max').read_text())
+              quota,period=(cg/'cpu.max').read_text().split()
+              check('CPU_CGROUP_LIMIT',quota!='max' and int(quota)>0 and int(quota)/int(period)<=1,{'quota':quota,'period':period})
+              check('MEMORY_CGROUP_LIMIT',0<mem<=256*1024*1024,{'bytes':mem})
+              check('PID_CGROUP_LIMIT',1<pids<=32,{'maximum':pids})
+              limits={str(k):list(resource.getrlimit(k)) for k in [resource.RLIMIT_AS,resource.RLIMIT_CPU,resource.RLIMIT_FSIZE,resource.RLIMIT_NOFILE]}
+              check('RLIMITS_ACTIVE',resource.getrlimit(resource.RLIMIT_AS)==(192*1024*1024,192*1024*1024)
+                    and resource.getrlimit(resource.RLIMIT_CPU)==(1,2)
+                    and resource.getrlimit(resource.RLIMIT_FSIZE)==(2*1024*1024,2*1024*1024)
+                    and resource.getrlimit(resource.RLIMIT_NOFILE)==(32,32),limits)
+              memory=subprocess.run([sys.executable,'-I','-S','-c',
+                  'import sys\ntry: bytearray(384*1024*1024)\nexcept MemoryError: sys.exit(73)\nsys.exit(74)'],
+                  stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3,close_fds=True)
+              check('MEMORY_ALLOCATION_DENIED',memory.returncode==73,{'exit_code':memory.returncode})
+              cpu=subprocess.run([sys.executable,'-I','-S','-c','while True: pass'],stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5,close_fds=True)
+              check('CPU_TIME_ENFORCEMENT',cpu.returncode in (-signal.SIGXCPU,-signal.SIGKILL),{'exit_code':cpu.returncode})
+              events_before=dict(line.split() for line in (cg/'pids.events').read_text().splitlines())
+              rd,wr=os.pipe();children=[];fork_denied=False
+              try:
+                  for _ in range(40):
+                      try:pid=os.fork()
+                      except OSError as e:
+                          fork_denied=e.errno==errno.EAGAIN;break
+                      if pid==0:
+                          os.close(wr)
+                          try:os.read(rd,1)
+                          finally:os._exit(0)
+                      children.append(pid)
+              finally:
+                  os.close(wr);os.close(rd)
+                  for pid in children:os.waitpid(pid,0)
+              events_after=dict(line.split() for line in (cg/'pids.events').read_text().splitlines())
+              check('PROCESS_CREATION_LIMIT_ENFORCED',fork_denied and int(events_after.get('max',0))>int(events_before.get('max',0)),
+                    {'children_created':len(children),'cgroup_limit_event_increased':int(events_after.get('max',0))>int(events_before.get('max',0))})
+              peak=(cg/'memory.peak').read_text().strip() if (cg/'memory.peak').exists() else 'UNAVAILABLE'
+              print(json.dumps({'status':'PASS','scope':'SYNTHETIC_CONTAINER_CONTROLS_ONLY_NOT_COMPLETE_SECURITY','checks':checks,
+                  'resources':{'main_peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,'cgroup_memory_peak_bytes':peak}},sort_keys=True))
+          except BaseException as e:
+              print(json.dumps({'status':'FAIL','error_type':type(e).__name__,'failed_check':str(e),'checks':checks},sort_keys=True))
+              sys.exit(1)
+          '''
+          
+          WORK = None
+          CONTAINER = None
+          IMAGE = None
+          CHILD_STARTS = 0
+          RECEIPTS = {}
+          CLEAN = {'PATH': '/usr/bin:/bin', 'HOME': '/', 'LANG': 'C.UTF-8'}
+          
+          
+          def require(condition, name):
+              if not condition:
+                  raise RuntimeError(name)
+          
+          
+          def run(argv, timeout=15, input_bytes=None, env=None, pass_fds=()):
+              try:
+                  result = subprocess.run(argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                          timeout=timeout, env=env or CLEAN, cwd='/', close_fds=True, pass_fds=pass_fds)
+              except subprocess.TimeoutExpired as error:
+                  RECEIPTS['failed_system_command'] = {'argv':argv,'timeout_seconds':timeout,
+                      'stdout':(error.stdout or b'').decode(errors='replace')[:4096],
+                      'stderr':(error.stderr or b'').decode(errors='replace')[:4096]}
+                  raise
+              if result.returncode:
+                  RECEIPTS['failed_system_command'] = {'argv':argv,'exit_code':result.returncode,
+                      'stdout':result.stdout.decode(errors='replace')[:4096],
+                      'stderr':result.stderr.decode(errors='replace')[:4096]}
+              require(result.returncode == 0, 'SYSTEM_COMMAND_FAILED:' + Path(argv[0]).name)
+              return result.stdout
+          
+          
+          def make_image():
+              executable = Path('/usr/bin/python3.12')
+              stdlib = Path('/usr/lib/python3.12')
+              require(executable.is_file() and stdlib.is_dir(), 'PREINSTALLED_SYSTEM_PYTHON_UNAVAILABLE')
+              sources = {executable}
+              for p in stdlib.rglob('*'):
+                  if p.is_file() and '__pycache__' not in p.parts and p.suffix not in ['.pyc', '.pyo']:
+                      require(p.resolve().is_relative_to(stdlib), 'SYSTEM_STDLIB_SYMLINK_OUTSIDE_ALLOWLIST')
+                      sources.add(p)
+              dynamic = [executable] + sorted((stdlib / 'lib-dynload').glob('*.so'))
+              for binary in dynamic:
+                  listing = run(['/usr/bin/ldd', str(binary)]).decode()
+                  require('not found' not in listing, 'PREINSTALLED_LIBRARY_UNAVAILABLE')
+                  for item in re.findall(r'(?:=>\s*)?(/[^\s()]+)', listing):
+                      p = Path(item)
+                      require(p.is_file() and str(p).startswith(('/lib/', '/lib64/', '/usr/lib/')), 'SYSTEM_LIBRARY_OUTSIDE_ALLOWLIST')
+                      require(str(p.resolve()).startswith(('/usr/lib/', '/lib/', '/lib64/')), 'SYSTEM_LIBRARY_TARGET_OUTSIDE_ALLOWLIST')
+                      sources.add(p)
+              total = sum(p.stat().st_size for p in sources)
+              require(total < 256 * 1024 * 1024 and len(sources) < 10000, 'LOCAL_ROOTFS_SIZE_BOUND')
+              manifest = []
+              archive = WORK / 'public-runtime.tar'
+              with tarfile.open(archive, 'w', format=tarfile.USTAR_FORMAT) as tar:
+                  for source in sorted(sources):
+                      content = source.read_bytes()
+                      item = tarfile.TarInfo(str(source).lstrip('/'))
+                      item.size = len(content); item.mode = 0o755 if source.stat().st_mode & 0o111 else 0o644
+                      tar.addfile(item, io.BytesIO(content))
+                      manifest.append({'path': str(source), 'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()})
+                  generated = {'proof.py': CHILD.encode(),
+                               'etc/passwd': b'proof:x:65534:65534:synthetic proof:/tmp:/nonexistent\n',
+                               'etc/group': b'proof:x:65534:\n', 'etc/nsswitch.conf': b'passwd: files\ngroup: files\n'}
+                  for path, content in generated.items():
+                      item = tarfile.TarInfo(path); item.size = len(content); item.mode = 0o644
+                      tar.addfile(item, io.BytesIO(content))
+                  for path in ['tmp', 'proc', 'sys', 'dev']:
+                      item = tarfile.TarInfo(path); item.type = tarfile.DIRTYPE
+                      item.mode = 0o1777 if path == 'tmp' else 0o755; tar.addfile(item)
+              require(archive.stat().st_size < 300 * 1024 * 1024, 'LOCAL_TAR_SIZE_BOUND')
+              RECEIPTS['public_runtime_manifest'] = manifest
+              RECEIPTS['image_origin'] = {'method': 'Local Docker image import of preinstalled hosted-runner system Python, stdlib and linked system libraries only',
+                                        'external_image_pull': False, 'dependency_installation': False,
+                                        'archive_bytes': archive.stat().st_size,
+                                        'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
+              return run(['/usr/bin/docker', 'image', 'import', '--platform', 'linux/amd64', str(archive)], timeout=45).decode().strip()
+          
+          
+          def main():
+              global WORK, CONTAINER, IMAGE, CLEAN, CHILD_STARTS
+              expected = os.environ.get('PROOF_EXPECTED_REPOSITORY', '')
+              actual = os.environ.get('PROOF_CURRENT_REPOSITORY', '')
+              require(re.fullmatch(r'[A-Za-z0-9_.-]+/veritas-disposable-isolation-proof-a1', expected) is not None, 'DISPOSABLE_REPOSITORY_NAME_REQUIRED')
+              require(actual == expected, 'TARGET_REPOSITORY_MISMATCH')
+              require(os.environ.get('PROOF_VISIBILITY') == 'public', 'PUBLIC_REPOSITORY_REQUIRED')
+              require(os.environ.get('PROOF_EVENT') == 'workflow_dispatch' and os.environ.get('PROOF_ATTEMPT') == '1', 'ONE_MANUAL_RUN_ONLY')
+              require(os.environ.get('PROOF_REF') == 'refs/heads/main', 'VERIFIED_MAIN_BRANCH_REQUIRED')
+              require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and os.environ.get('RUNNER_OS') == 'Linux', 'STANDARD_GITHUB_HOSTED_LINUX_REQUIRED')
+              require(os.geteuid() != 0, 'NONROOT_HOST_ORCHESTRATOR_REQUIRED')
+              require(Path('/usr/bin/docker').is_file(), 'PREINSTALLED_DOCKER_REQUIRED_NO_INSTALL')
+              WORK = Path(tempfile.mkdtemp(prefix='synthetic-isolation-a1-', dir='/tmp'))
+              (WORK / 'docker-config').mkdir()
+              CLEAN = {'PATH': '/usr/bin:/bin', 'HOME': str(WORK / 'docker-config'),
+                       'DOCKER_CONFIG': str(WORK / 'docker-config'), 'DOCKER_HOST': 'unix:///var/run/docker.sock', 'LANG': 'C.UTF-8'}
+              info = json.loads(run(['/usr/bin/docker', 'info', '--format', '{{json .}}']))
+              require(info.get('OSType') == 'linux' and info.get('Architecture') == 'x86_64' and info.get('CgroupVersion') == '2', 'EXPECTED_DOCKER_CGROUP_V2_REQUIRED')
+              RECEIPTS['runner'] = {'repository': actual, 'ref': os.environ['PROOF_REF'], 'commit': os.environ.get('PROOF_COMMIT'),
+                                    'run_id': os.environ.get('PROOF_RUN_ID'), 'runner_image_version': os.environ.get('ImageVersion'),
+                                    'host_uid': os.geteuid(), 'docker_version': info.get('ServerVersion'), 'cgroup_version': '2'}
+              IMAGE = make_image()
+              require(re.fullmatch(r'sha256:[0-9a-f]{64}', IMAGE) is not None, 'LOCAL_IMAGE_ID_INVALID')
+              RECEIPTS['local_image_id'] = IMAGE
+              canary = WORK / 'synthetic-outside-child.txt'
+              canary.write_text('SYNTHETIC_CANARY_NOT_A_CREDENTIAL')
+              synthetic_fd = os.open(canary, os.O_RDONLY)
+              server = socket.socket(); server.bind(('127.0.0.1', 0)); server.listen(2); server.settimeout(1)
+              port = server.getsockname()[1]; stop = threading.Event()
+              def serve():
+                  while not stop.is_set():
+                      try:
+                          connection, _ = server.accept()
+                          with connection: connection.sendall(b'SYNTHETIC_NETWORK_CANARY')
+                      except socket.timeout: pass
+                      except OSError: break
+              thread = threading.Thread(target=serve, daemon=True); thread.start()
+              with socket.create_connection(('127.0.0.1', port), timeout=1) as positive:
+                  require(positive.recv(64) == b'SYNTHETIC_NETWORK_CANARY', 'HOST_NETWORK_CANARY_POSITIVE_CONTROL')
+              args = ['/usr/bin/docker', 'container', 'create', '--pull=never', '--user', '65534:65534',
+                      '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges=true',
+                      '--cgroupns', 'private', '--cpus', '1', '--memory', '256m', '--memory-swap', '256m',
+                      '--pids-limit', '32', '--ulimit', 'as=201326592:201326592', '--ulimit', 'cpu=1:2',
+                      '--ulimit', 'fsize=2097152:2097152', '--ulimit', 'nofile=32:32', '--ulimit', 'core=0:0',
+                      '--shm-size', '1m', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777',
+                      '--hostname', 'proof-child', '--env', 'PATH=/usr/bin:/bin', '--env', 'HOME=/tmp',
+                      '--env', 'LANG=C.UTF-8', '--env', 'HOSTNAME=proof-child',
+                      IMAGE, '/usr/bin/python3.12', '-I', '-S', '/proof.py', str(canary), str(port)]
+              CONTAINER = run(args).decode().strip()
+              require(re.fullmatch(r'[0-9a-f]{64}', CONTAINER) is not None, 'LOCAL_CONTAINER_ID_INVALID')
+              inspection = json.loads(run(['/usr/bin/docker', 'container', 'inspect', CONTAINER]))[0]
+              host, imageconfig = inspection['HostConfig'], inspection['Config']
+              require(not host['Privileged'] and host['ReadonlyRootfs'] and host['NetworkMode'] == 'none', 'DOCKER_POLICY_NOT_APPLIED')
+              require(host['CapDrop'] == ['ALL'] and host.get('CapAdd') in (None, []), 'DOCKER_CAPABILITY_POLICY')
+              require('no-new-privileges=true' in host['SecurityOpt'], 'DOCKER_NO_NEW_PRIVILEGES_POLICY')
+              require(not host.get('Binds') and not host.get('Devices') and not host.get('VolumesFrom'), 'NO_HOST_PATH_OR_DEVICE_ATTACHMENTS')
+              require(not host.get('PortBindings') and host.get('PidMode', '') != 'host' and host.get('IpcMode') != 'host', 'NO_HOST_CONTROL_NAMESPACES')
+              require(all(m['Type'] == 'tmpfs' and m['Destination'] == '/tmp' for m in inspection.get('Mounts', [])), 'UNEXPECTED_MOUNT')
+              require(imageconfig['User'] == '65534:65534' and set(imageconfig['Env']) == {'PATH=/usr/bin:/bin', 'HOME=/tmp', 'LANG=C.UTF-8', 'HOSTNAME=proof-child'}, 'CHILD_IDENTITY_OR_ENV_POLICY')
+              RECEIPTS['container_controls'] = {key: host.get(key) for key in ['Privileged','ReadonlyRootfs','NetworkMode','CapDrop','CapAdd','SecurityOpt','NanoCpus','Memory','MemorySwap','PidsLimit','CgroupnsMode','Ulimits','Tmpfs','Binds','Devices','PortBindings']}
+              start = time.monotonic()
+              try:
+                  environment = dict(CLEAN, VERITAS_SYNTHETIC_SECRET='SYNTHETIC_ONLY_NOT_AUTHENTICATION')
+                  CHILD_STARTS += 1
+                  try:
+                      proc = subprocess.run(['/usr/bin/docker', 'container', 'start', '--attach', CONTAINER], env=environment,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            timeout=30, close_fds=True, pass_fds=(synthetic_fd,), cwd='/')
+                  except subprocess.TimeoutExpired as error:
+                      RECEIPTS['child_process'] = {'timeout_seconds':30,'elapsed_seconds':time.monotonic()-start,
+                          'stdout':(error.stdout or b'').decode(errors='replace'),
+                          'stderr':(error.stderr or b'').decode(errors='replace')}
+                      raise
+                  RECEIPTS['child_process'] = {'docker_attach_exit_code': proc.returncode,
+                      'stdout': proc.stdout.decode(errors='replace'), 'stderr': proc.stderr.decode(errors='replace'),
+                      'elapsed_seconds': time.monotonic()-start, 'synthetic_host_env_and_fd_present': True}
+                  state = json.loads(run(['/usr/bin/docker','container','inspect',CONTAINER]))[0]['State']
+                  RECEIPTS['child_exit'] = {'exit_code': state['ExitCode'], 'oom_killed': state['OOMKilled']}
+                  require(proc.returncode == 0 and state['ExitCode'] == 0 and not state['OOMKilled'], 'CHILD_EXECUTION_FAILED_NO_RETRY')
+                  child = json.loads(proc.stdout)
+                  RECEIPTS['child_result'] = child
+                  require(child['status'] == 'PASS' and all(c['pass'] for c in child['checks']), 'SYNTHETIC_PROOF_FAILED')
+                  require(canary.read_text() == 'SYNTHETIC_CANARY_NOT_A_CREDENTIAL', 'HOST_CANARY_CHANGED')
+                  RECEIPTS['verdict'] = 'PASS_SYNTHETIC_CONTROLS_ONLY'
+              finally:
+                  os.close(synthetic_fd); stop.set(); server.close(); thread.join(timeout=2)
+          
+          
+          try:
+              main()
+          except BaseException as error:
+              RECEIPTS['verdict'] = 'BLOCKED'
+              RECEIPTS['blocker'] = str(error)
+          finally:
+              for kind, identifier in [('container', CONTAINER), ('image', IMAGE)]:
+                  if identifier:
+                      try: run(['/usr/bin/docker', kind, 'rm', '--force', identifier], timeout=10)
+                      except BaseException:
+                          RECEIPTS['cleanup_failure'] = kind
+                          RECEIPTS['verdict'] = 'BLOCKED'
+              RECEIPTS['scope'] = {'model_download': 'NONE', 'model_execution': 'NONE', 'training': 'NONE',
+                                   'private_project_access': 'NONE', 'credentials_copied': False,
+                                   'external_images_or_packages_acquired': False, 'child_runs_attempted': CHILD_STARTS}
+              if WORK:
+                  try:shutil.rmtree(WORK)
+                  except BaseException:
+                      RECEIPTS['cleanup_failure']='exclusive_temporary_directory'
+                      RECEIPTS['verdict']='BLOCKED'
+              blob = io.BytesIO()
+              with zipfile.ZipFile(blob,'w',zipfile.ZIP_DEFLATED) as packet:
+                  packet.writestr('synthetic-isolation-receipts.json',json.dumps(RECEIPTS,indent=2,sort_keys=True))
+              data=blob.getvalue()
+              print('PUBLIC_SYNTHETIC_RECEIPTS_SHA256='+hashlib.sha256(data).hexdigest())
+              print('PUBLIC_SYNTHETIC_RECEIPTS_BYTES='+str(len(data)))
+              print('PUBLIC_SYNTHETIC_RECEIPTS_BASE64_BEGIN')
+              encoded=base64.b64encode(data).decode()
+              for i in range(0,len(encoded),76):print(encoded[i:i+76])
+              print('PUBLIC_SYNTHETIC_RECEIPTS_BASE64_END')
+              print('SECURE_ISOLATED_RUNNER='+('PASS_SYNTHETIC_SCOPE' if RECEIPTS.get('verdict')=='PASS_SYNTHETIC_CONTROLS_ONLY' else 'BLOCKED'))
+          if RECEIPTS.get('verdict')!='PASS_SYNTHETIC_CONTROLS_ONLY':sys.exit(1)
+          PY_SYNTHETIC_PROOF

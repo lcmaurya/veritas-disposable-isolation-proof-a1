@@ -1,0 +1,237 @@
+# VERITAS V3 public asset candidate acquisition only. Manual dispatch; no model weights.
+# This workflow does not execute downloaded wheels, load models, or train.
+name: Public tokenizer and CPU-wheel candidate acquisition
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_repository:
+        description: Exact public disposable repository identity
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  acquire-public-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions: {}
+    env:
+      EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+      ASSET_OUTPUT: ${{ github.workspace }}/veritas-a1-assets-${{ github.run_id }}
+    steps:
+      - name: Fail-closed repository, ref, trigger and attempt check
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'lcmaurya/veritas-disposable-isolation-proof-a1' ]] || exit 22
+          [[ "$EXPECTED_REPOSITORY" == 'lcmaurya/veritas-disposable-isolation-proof-a1' ]] || exit 23
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]] || exit 24
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]] || exit 25
+          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || exit 26
+          echo 'PUBLIC_REPOSITORY_MANUAL_DISPATCH_CHECK=PASS'
+
+      - name: Select exact Python 3.12 (no dependency installation)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0, Node 24
+        with:
+          python-version: '3.12'
+          check-latest: false
+
+      - name: Materialize SHA-bound acquisition helper, then acquire candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(python -c 'import sys; print(sys.version_info[:2] == (3, 12))')" == 'True' ]] || exit 27
+          [[ ! -e "$ASSET_OUTPUT" ]] || exit 28
+          helper="$RUNNER_TEMP/veritas-public-acquire-a1.py"
+          [[ ! -e "$helper" ]] || exit 29
+          cat > "$helper" <<'PY_SOURCE_BOUND_A1'
+          #!/usr/bin/env python3
+          """Download public tokenizer + complete CPU-only wheel candidate into a NEW directory.
+          
+          NO model weights; NO installs or imports of downloaded code; NO training; NO GitHub write.
+          This is a reproducible acquisition helper, NOT a trusted dependency approval.
+          Usage on explicitly approved network-enabled Python 3.12/3.13 environment:
+            python3 VERITAS_V3_ACQUIRE_PUBLIC_TOKENIZER_WHEELS_A1.py OUTPUT_DIR
+          
+          The whole OUTPUT_DIR must not exist before this command. If verification fails,
+          inspect the recorded failure; do not use or promote its contents.
+          """
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          from urllib.request import urlopen, Request
+          from zipfile import ZipFile
+          
+          MODEL = 'microsoft/Multilingual-MiniLM-L12-H384'
+          REV = '6e8c1ec6b4ec4e3fc6eb7d2cd834fcd582b61daf'
+          NAME = 'sentencepiece.bpe.model'
+          HF_TREE = f'https://huggingface.co/api/models/{MODEL}/tree/{REV}'
+          HF_FILE = f'https://huggingface.co/{MODEL}/resolve/{REV}/{NAME}'
+          WHEEL_INDEX = 'https://pypi.org/simple'
+          TORCH_INDEX = 'https://download.pytorch.org/whl/cpu'
+          DIRECT = [
+              'numpy==1.26.4', 'torch==2.5.1+cpu', 'transformers==4.44.2',
+              'tokenizers==0.19.1', 'sentencepiece==0.2.0', 'safetensors==0.4.5',
+              'protobuf==4.25.5', 'huggingface-hub==0.24.7',
+          ]
+          PLATFORMS = [
+              'manylinux_2_28_x86_64', 'manylinux_2_27_x86_64',
+              'manylinux_2_17_x86_64', 'manylinux2014_x86_64',
+              'linux_x86_64', # Official PyTorch CPU wheel uses this tag.
+          ]
+          
+          def fail(msg):
+              raise RuntimeError(msg)
+          
+          def request_bytes(url, max_bytes):
+              with urlopen(Request(url, headers={'User-Agent':'VERITAS-PUBLIC-ASSET-A1/1'}), timeout=45) as r:
+                  data = r.read(max_bytes + 1)
+              if len(data) > max_bytes:
+                  fail('METADATA_TOO_LARGE')
+              return data
+          
+          def sha(path):
+              h = hashlib.sha256()
+              with open(path, 'rb') as stream:
+                  for part in iter(lambda:stream.read(1024*1024), b''):
+                      h.update(part)
+              return h.hexdigest()
+          
+          def tokenizer(out):
+              meta = json.loads(request_bytes(HF_TREE, 2_000_000))
+              if not isinstance(meta, list):
+                  fail('OFFICIAL_TREE_NOT_LIST')
+              matches = [x for x in meta if x.get('path') == NAME and x.get('type') == 'file']
+              if len(matches) != 1:
+                  fail('TOKENIZER_NOT_UNIQUE_IN_PINNED_TREE')
+              obj = matches[0]
+              lfs = obj.get('lfs') or {}
+              trusted = lfs.get('oid')
+              if not isinstance(trusted,str) or not re.fullmatch('[a-f0-9]{64}', trusted):
+                  fail('OFFICIAL_TOKENIZER_CONTENT_SHA256_UNAVAILABLE')
+              size = obj.get('size')
+              if not isinstance(size,int) or not 0 < size < 20_000_000:
+                  fail('TOKENIZER_OFFICIAL_SIZE_INVALID')
+              tmp = out / 'tokenizer.download-incomplete'
+              h = hashlib.sha256(); total = 0
+              with urlopen(Request(HF_FILE,headers={'User-Agent':'VERITAS-PUBLIC-ASSET-A1/1'}), timeout=90) as source, open(tmp,'xb') as dest:
+                  while chunk := source.read(1024*1024):
+                      total += len(chunk)
+                      if total > 20_000_000:
+                          fail('TOKENIZER_TOO_LARGE')
+                      h.update(chunk); dest.write(chunk)
+              observed = h.hexdigest()
+              if total != size or observed != trusted:
+                  fail('TOKENIZER_CONTENT_OR_SIZE_MISMATCH_WITH_PINNED_OFFICIAL_METADATA')
+              dest = out / NAME
+              os.replace(tmp, dest)
+              return {'model': MODEL,'revision':REV,'path':NAME,'source':HF_FILE,
+                      'bytes':total,'sha256':observed,'official_lfs_sha256':trusted,
+                      'verified_source_content_identity':True}
+          
+          def wheel_meta(path):
+              with ZipFile(path) as z:
+                  metadata_names = [x for x in z.namelist() if x.endswith('.dist-info/METADATA')]
+                  if len(metadata_names) != 1:
+                      fail('WHEEL_METADATA_MISSING_OR_AMBIGUOUS:'+path.name)
+                  m = z.read(metadata_names[0]).decode('utf-8')
+              name = re.search(r'^Name: (.+)$',m,re.M)
+              version = re.search(r'^Version: (.+)$',m,re.M)
+              if not (name and version):
+                  fail('WHEEL_NAME_VERSION_MISSING:'+path.name)
+              return (name.group(1).strip(),version.group(1).strip())
+          
+          def wheel_manifest(folder):
+              files = sorted(folder.iterdir())
+              if not files or any(not p.is_file() or p.suffix!='.whl' for p in files):
+                  fail('UNEXPECTED_NONWHEEL_OR_EMPTY_DOWNLOAD')
+              recs=[]; names=set()
+              for p in files:
+                  name,version=wheel_meta(p)
+                  norm=re.sub('[-_.]+','-',name).lower()
+                  if norm in names:
+                      fail('DUPLICATE_DIST:'+norm)
+                  names.add(norm)
+                  if norm.startswith('nvidia-') or norm=='triton':
+                      fail('UNEXPECTED_GPU_DEPENDENCY:'+norm)
+                  if norm=='torch' and version!='2.5.1+cpu':
+                      fail('CPU_TORCH_MISMATCH')
+                  recs.append({'file':p.name,'name':name,'version':version,'bytes':p.stat().st_size,'sha256':sha(p)})
+              wanted={'numpy':'1.26.4','torch':'2.5.1+cpu','transformers':'4.44.2',
+                 'tokenizers':'0.19.1','sentencepiece':'0.2.0','safetensors':'0.4.5',
+                 'protobuf':'4.25.5','huggingface-hub':'0.24.7'}
+              actual={re.sub('[-_.]+','-',r['name']).lower():r['version'] for r in recs}
+              for k,v in wanted.items():
+                  if actual.get(k)!=v:
+                      fail('MISSING_DIRECT_WHEEL_OR_WRONG_VERSION:'+k)
+              return recs
+          
+          def pip_args():
+              args=[sys.executable,'-m','pip','download','--no-cache-dir','--only-binary=:all:',
+                    '--python-version','3.12','--implementation','cp','--abi','cp312']
+              for platform in PLATFORMS:args.extend(['--platform',platform])
+              return args
+          
+          def wheels(out):
+              wd=out/'wheels';wd.mkdir()
+              cmd=pip_args()+['--index-url',WHEEL_INDEX,'--extra-index-url',TORCH_INDEX,'--dest',str(wd)]+DIRECT
+              subprocess.run(cmd,check=True)
+              original=wheel_manifest(wd)
+              # Offline resolver must acquire exactly the wheel set already present.
+              checkdir=out/'offline_resolve_check';checkdir.mkdir()
+              verify=pip_args()+['--no-index','--find-links',str(wd),'--dest',str(checkdir)]+DIRECT
+              subprocess.run(verify,check=True)
+              second=wheel_manifest(checkdir)
+              first_digest={x['file']:x['sha256'] for x in original}
+              second_digest={x['file']:x['sha256'] for x in second}
+              if first_digest!=second_digest:
+                  fail('OFFLINE_DEPENDENCY_CLOSURE_MISMATCH')
+              for p in checkdir.iterdir():p.unlink()
+              checkdir.rmdir()
+              return original
+          
+          def main():
+              ap=argparse.ArgumentParser();ap.add_argument('output_dir');args=ap.parse_args()
+              output=Path(args.output_dir).expanduser().absolute()
+              if output.exists():fail('DESTINATION_MUST_NOT_EXIST')
+              output.mkdir(mode=0o700,parents=True)
+              try:
+                  tok=tokenizer(output)
+                  wheel_list=wheels(output)
+                  lock={'status':'ACQUIRED_VERIFIED_FOR_SOURCE_ONLY_REVIEW_NOT_APPROVED_FOR_EXECUTION',
+                        'model_weights_acquired':False,'training_executed':False,'github_write':False,
+                        'production_changed':False,'tokenizer':tok,
+                        'python_target':'CPython 3.12','platform_target':PLATFORMS,
+                        'wheel_sources':[WHEEL_INDEX,TORCH_INDEX],
+                        'direct_requirements':DIRECT,'wheels':wheel_list,
+                        'transitive_wheel_closure_resolved_offline':True,
+                        'note':'Candidate lock; separate independent review/admission required before running downloaded code.'}
+                  (output/'ACQUIRED_ASSET_LOCK.json').write_text(json.dumps(lock,sort_keys=True,indent=2)+'\n')
+                  print('ACQUISITION_SUCCESS_LOCK='+str(output/'ACQUIRED_ASSET_LOCK.json'))
+                  print('WHEELS='+str(len(wheel_list)))
+              except BaseException as err:
+                  (output/'ACQUISITION_FAILED.txt').write_text(type(err).__name__+': '+str(err)+'\n')
+                  raise
+          if __name__=='__main__':main()
+          PY_SOURCE_BOUND_A1
+          printf '%s  %s\n' 'b564bcffa525c5be14c8829b3670b53e8645170da5998a2b3ecdca42b1a7363d' "$helper" | sha256sum --check --status
+          echo 'EXACT_SOURCE_HELPER_SHA256=PASS'
+          python "$helper" "$ASSET_OUTPUT"
+          test -s "$ASSET_OUTPUT/ACQUIRED_ASSET_LOCK.json"
+          echo 'ACQUISITION_CANDIDATE_RECEIPT=PASS_NOT_ADMITTED'
+
+      - name: Upload PUBLIC-only candidate artifact (one-day retention)
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0, Node 24
+        with:
+          name: public-tokenizer-cpu-wheel-candidate-${{ github.run_id }}
+          path: ${{ env.ASSET_OUTPUT }}/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0

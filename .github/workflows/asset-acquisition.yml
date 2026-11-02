@@ -112,28 +112,59 @@ jobs:
               if len(matches) != 1:
                   fail('TOKENIZER_NOT_UNIQUE_IN_PINNED_TREE')
               obj = matches[0]
-              lfs = obj.get('lfs') or {}
-              trusted = lfs.get('oid')
-              if not isinstance(trusted,str) or not re.fullmatch('[a-f0-9]{64}', trusted):
-                  fail('OFFICIAL_TOKENIZER_CONTENT_SHA256_UNAVAILABLE')
+              # A repository can store small/medium files directly as Git blobs. Those
+              # have Git SHA-1 object IDs, not LFS SHA-256. Never reinterpret a Git OID
+              # as a SHA-256, or silently downgrade an invalid LFS record.
+              lfs = obj.get('lfs')
+              if lfs is None:
+                  trusted_git_oid = obj.get('oid')
+                  if not isinstance(trusted_git_oid, str) or not re.fullmatch('[a-f0-9]{40}', trusted_git_oid):
+                      fail('OFFICIAL_TOKENIZER_GIT_BLOB_OID_UNAVAILABLE')
+                  trusted_sha256 = None
+                  identity_basis = 'PINNED_TREE_GIT_BLOB_SHA1'
+              else:
+                  if not isinstance(lfs, dict):
+                      fail('OFFICIAL_TOKENIZER_LFS_METADATA_MALFORMED')
+                  trusted_sha256 = lfs.get('oid')
+                  if not isinstance(trusted_sha256, str) or not re.fullmatch('[a-f0-9]{64}', trusted_sha256):
+                      fail('OFFICIAL_TOKENIZER_CONTENT_SHA256_UNAVAILABLE')
+                  trusted_git_oid = None
+                  identity_basis = 'PINNED_TREE_LFS_SHA256'
               size = obj.get('size')
               if not isinstance(size,int) or not 0 < size < 20_000_000:
                   fail('TOKENIZER_OFFICIAL_SIZE_INVALID')
               tmp = out / 'tokenizer.download-incomplete'
-              h = hashlib.sha256(); total = 0
+              sha256 = hashlib.sha256()
+              git_sha1 = hashlib.sha1()
+              git_sha1.update(b'blob ' + str(size).encode('ascii') + b'\0')
+              total = 0
               with urlopen(Request(HF_FILE,headers={'User-Agent':'VERITAS-PUBLIC-ASSET-A1/1'}), timeout=90) as source, open(tmp,'xb') as dest:
                   while chunk := source.read(1024*1024):
                       total += len(chunk)
                       if total > 20_000_000:
                           fail('TOKENIZER_TOO_LARGE')
-                      h.update(chunk); dest.write(chunk)
-              observed = h.hexdigest()
-              if total != size or observed != trusted:
-                  fail('TOKENIZER_CONTENT_OR_SIZE_MISMATCH_WITH_PINNED_OFFICIAL_METADATA')
+                      sha256.update(chunk)
+                      git_sha1.update(chunk)
+                      dest.write(chunk)
+              observed_sha256 = sha256.hexdigest()
+              observed_git_oid = git_sha1.hexdigest()
+              if total != size:
+                  fail('TOKENIZER_SIZE_MISMATCH_WITH_PINNED_OFFICIAL_METADATA')
+              if trusted_sha256 is not None:
+                  if observed_sha256 != trusted_sha256:
+                      fail('TOKENIZER_LFS_SHA256_MISMATCH')
+              elif observed_git_oid != trusted_git_oid:
+                  fail('TOKENIZER_GIT_BLOB_SHA1_MISMATCH')
               dest = out / NAME
               os.replace(tmp, dest)
-              return {'model': MODEL,'revision':REV,'path':NAME,'source':HF_FILE,
-                      'bytes':total,'sha256':observed,'official_lfs_sha256':trusted,
+              return {'model':MODEL,'revision':REV,'path':NAME,'source':HF_FILE,
+                      'bytes':total,'sha256':observed_sha256,
+                      'identity_basis':identity_basis,
+                      'official_lfs_sha256':trusted_sha256,
+                      'official_git_blob_sha1':trusted_git_oid,
+                      'observed_git_blob_sha1':observed_git_oid,
+                      'sha256_verified_against_official_metadata':trusted_sha256 is not None,
+                      'sha256_record_only_needs_independent_admission':trusted_sha256 is None,
                       'verified_source_content_identity':True}
           
           def wheel_meta(path):
@@ -221,7 +252,7 @@ jobs:
                   raise
           if __name__=='__main__':main()
           PY_SOURCE_BOUND_A1
-          printf '%s  %s\n' 'b564bcffa525c5be14c8829b3670b53e8645170da5998a2b3ecdca42b1a7363d' "$helper" | sha256sum --check --status
+          printf '%s  %s\n' 'c73b0fead703a8124faa9477a104c4154ad72fa83f66c430ccdb49a196ac1926' "$helper" | sha256sum --check --status
           echo 'EXACT_SOURCE_HELPER_SHA256=PASS'
           python "$helper" "$ASSET_OUTPUT"
           test -s "$ASSET_OUTPUT/ACQUIRED_ASSET_LOCK.json"

@@ -143,6 +143,16 @@ jobs:
               sys.exit(1)
           '''
           
+          # Trusted bootstrap startup is covered by Docker's memory/swap cgroup bounds.
+          # Install and verify RLIMIT_AS before exec loads the restricted proof/workload.
+          LIMIT_BOOTSTRAP = r'''
+          import os,resource,sys
+          resource.setrlimit(resource.RLIMIT_AS,(201326592,201326592))
+          if resource.getrlimit(resource.RLIMIT_AS)!=(201326592,201326592):
+              raise RuntimeError('RLIMIT_AS_BOOTSTRAP_VERIFICATION_FAILED')
+          os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','/proof.py',*sys.argv[1:]])
+          '''
+          
           WORK = None
           CONTAINER = None
           IMAGE = None
@@ -310,12 +320,12 @@ jobs:
               args = ['/usr/bin/docker', 'container', 'create', '--pull=never', '--user', '65534:65534',
                       '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges=true',
                       '--cgroupns', 'private', '--cpus', '1', '--memory', '256m', '--memory-swap', '256m',
-                      '--pids-limit', '32', '--ulimit', 'as=201326592:201326592', '--ulimit', 'cpu=1:2',
+                      '--pids-limit', '32', '--ulimit', 'cpu=1:2',
                       '--ulimit', 'fsize=2097152:2097152', '--ulimit', 'nofile=32:32', '--ulimit', 'core=0:0',
                       '--shm-size', '1m', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777',
                       '--hostname', 'proof-child', '--env', 'PATH=/usr/bin:/bin', '--env', 'HOME=/tmp',
                       '--env', 'LANG=C.UTF-8', '--env', 'HOSTNAME=proof-child',
-                      IMAGE, '/usr/bin/python3.12', '-I', '-S', '/proof.py', str(canary), str(port)]
+                      IMAGE, '/usr/bin/python3.12', '-I', '-S', '-c', LIMIT_BOOTSTRAP, str(canary), str(port)]
               CONTAINER = run(args).decode().strip()
               require(re.fullmatch(r'[0-9a-f]{64}', CONTAINER) is not None, 'LOCAL_CONTAINER_ID_INVALID')
               inspection = json.loads(run(['/usr/bin/docker', 'container', 'inspect', CONTAINER]))[0]

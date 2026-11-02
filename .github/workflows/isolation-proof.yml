@@ -177,8 +177,22 @@ jobs:
               executable = Path('/usr/bin/python3.12')
               stdlib = Path('/usr/lib/python3.12')
               require(executable.is_file() and stdlib.is_dir(), 'PREINSTALLED_SYSTEM_PYTHON_UNAVAILABLE')
+              require(sys.flags.isolated == 1 and sys.flags.no_site == 1, 'PYTHON_ISOLATED_NO_SITE_REQUIRED')
               sources = {executable}
               for p in stdlib.rglob('*'):
+                  if p == stdlib / 'sitecustomize.py':
+                      # -I -S is used by the orchestrator and every child interpreter.
+                      # Omit this one site hook before any target-following metadata or read.
+                      require(p.is_symlink(), 'SYSTEM_STDLIB_SITECUSTOMIZE_NOT_SYMLINK')
+                      RECEIPTS['stdlib_sitecustomize_exclusion'] = {
+                          'entry_relative_to_stdlib': 'sitecustomize.py',
+                          'reason': 'SITE_HOOK_UNUSED_UNDER_EXPLICIT_ISOLATED_NO_SITE',
+                          'entry_is_symlink': True,
+                          'target_followed': False,
+                          'target_contents_read': False,
+                          'included_in_runtime': False,
+                      }
+                      continue
                   if p.is_file() and '__pycache__' not in p.parts and p.suffix not in ['.pyc', '.pyo']:
                       resolved = p.resolve()
                       if not resolved.is_relative_to(stdlib):

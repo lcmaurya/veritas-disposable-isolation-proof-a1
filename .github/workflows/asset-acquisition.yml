@@ -168,16 +168,31 @@ jobs:
                       'verified_source_content_identity':True}
           
           def wheel_meta(path):
+              # PEP 427: the owning distribution's METADATA is at the wheel root.
+              # Ignore nested vendored packages that carry their own .dist-info/METADATA.
+              parts = path.name[:-4].split('-') if path.name.endswith('.whl') else []
+              if len(parts) not in (5, 6) or not all(parts):
+                  fail('WHEEL_FILENAME_INVALID:'+path.name)
+              filename_dist, filename_version = parts[:2]
+              normalized = lambda value: re.sub('[-_.]+', '-', value).lower()
               with ZipFile(path) as z:
-                  metadata_names = [x for x in z.namelist() if x.endswith('.dist-info/METADATA')]
+                  metadata_names = [x for x in z.namelist()
+                                    if x.count('/') == 1 and x.endswith('.dist-info/METADATA')]
                   if len(metadata_names) != 1:
-                      fail('WHEEL_METADATA_MISSING_OR_AMBIGUOUS:'+path.name)
+                      fail('WHEEL_ROOT_METADATA_MISSING_OR_AMBIGUOUS:'+path.name)
+                  metadata_dir = metadata_names[0].split('/')[0]
+                  expected_dir = filename_dist+'-'+filename_version+'.dist-info'
+                  if normalized(metadata_dir) != normalized(expected_dir):
+                      fail('WHEEL_ROOT_METADATA_IDENTITY_MISMATCH:'+path.name)
                   m = z.read(metadata_names[0]).decode('utf-8')
-              name = re.search(r'^Name: (.+)$',m,re.M)
-              version = re.search(r'^Version: (.+)$',m,re.M)
+              name = re.search(r'^Name: (.+)$', m, re.M)
+              version = re.search(r'^Version: (.+)$', m, re.M)
               if not (name and version):
                   fail('WHEEL_NAME_VERSION_MISSING:'+path.name)
-              return (name.group(1).strip(),version.group(1).strip())
+              actual_name, actual_version = name.group(1).strip(), version.group(1).strip()
+              if normalized(actual_name) != normalized(filename_dist) or actual_version != filename_version:
+                  fail('WHEEL_FILENAME_METADATA_IDENTITY_MISMATCH:'+path.name)
+              return (actual_name, actual_version)
           
           def wheel_manifest(folder):
               files = sorted(folder.iterdir())
@@ -252,7 +267,7 @@ jobs:
                   raise
           if __name__=='__main__':main()
           PY_SOURCE_BOUND_A1
-          printf '%s  %s\n' 'c73b0fead703a8124faa9477a104c4154ad72fa83f66c430ccdb49a196ac1926' "$helper" | sha256sum --check --status
+          printf '%s  %s\n' 'd75d8f18c2b8bfc7a5231db8c02025c91f601f16f8b23e4e593ffabdca4d64db' "$helper" | sha256sum --check --status
           echo 'EXACT_SOURCE_HELPER_SHA256=PASS'
           python "$helper" "$ASSET_OUTPUT"
           test -s "$ASSET_OUTPUT/ACQUIRED_ASSET_LOCK.json"

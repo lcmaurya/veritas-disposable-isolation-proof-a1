@@ -178,6 +178,7 @@ jobs:
               stdlib = Path('/usr/lib/python3.12')
               require(executable.is_file() and stdlib.is_dir(), 'PREINSTALLED_SYSTEM_PYTHON_UNAVAILABLE')
               require(sys.flags.isolated == 1 and sys.flags.no_site == 1, 'PYTHON_ISOLATED_NO_SITE_REQUIRED')
+              config_alias = stdlib / 'config-3.12-x86_64-linux-gnu/libpython3.12.so'
               sources = {executable}
               for p in stdlib.rglob('*'):
                   if p == stdlib / 'sitecustomize.py':
@@ -188,6 +189,24 @@ jobs:
                           'entry_relative_to_stdlib': 'sitecustomize.py',
                           'reason': 'SITE_HOOK_UNUSED_UNDER_EXPLICIT_ISOLATED_NO_SITE',
                           'entry_is_symlink': True,
+                          'target_followed': False,
+                          'target_contents_read': False,
+                          'included_in_runtime': False,
+                      }
+                      continue
+                  if p == config_alias:
+                      # This exact link is for native build/embedding configuration.
+                      # Runtime libraries are admitted separately from ldd dependency paths.
+                      require(p.is_symlink(), 'SYSTEM_LIBPYTHON_CONFIG_ALIAS_NOT_SYMLINK')
+                      link_target = Path(os.path.normpath(os.path.join(str(p.parent), os.readlink(p))))
+                      require(link_target in {
+                          Path('/usr/lib/x86_64-linux-gnu/libpython3.12.so.1'),
+                          Path('/usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0'),
+                      }, 'SYSTEM_LIBPYTHON_CONFIG_ALIAS_UNEXPECTED_LINK')
+                      RECEIPTS['stdlib_libpython_config_exclusion'] = {
+                          'entry_relative_to_stdlib': p.relative_to(stdlib).as_posix(),
+                          'reason': 'BUILD_EMBEDDING_ALIAS_NOT_A_RUNTIME_SOURCE',
+                          'link_destination_checked_lexically': True,
                           'target_followed': False,
                           'target_contents_read': False,
                           'included_in_runtime': False,
@@ -216,6 +235,7 @@ jobs:
                   require('not found' not in listing, 'PREINSTALLED_LIBRARY_UNAVAILABLE')
                   for item in re.findall(r'(?:=>\s*)?(/[^\s()]+)', listing):
                       p = Path(item)
+                      require(Path(os.path.normpath(str(p))) != config_alias, 'BUILD_CONFIG_ALIAS_REQUIRED_AT_RUNTIME')
                       require(p.is_file() and str(p).startswith(('/lib/', '/lib64/', '/usr/lib/')), 'SYSTEM_LIBRARY_OUTSIDE_ALLOWLIST')
                       require(str(p.resolve()).startswith(('/usr/lib/', '/lib/', '/lib64/')), 'SYSTEM_LIBRARY_TARGET_OUTSIDE_ALLOWLIST')
                       sources.add(p)
